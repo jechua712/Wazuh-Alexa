@@ -40,7 +40,7 @@ show_header() {
          JMC       `-._-_-_.-'
 EOF
     echo -e "${NC}"
-    echo -e "${YELLOW}   WAZUH ALEXA AUTOMATION MANAGER v1.0${NC}"
+    echo -e "${YELLOW}   WAZUH ALEXA AUTOMATION MANAGER v1.1 (Fixed)${NC}"
     echo "==================================================="
 }
 
@@ -51,7 +51,6 @@ check_root() {
     fi
 }
 
-# Inicializa la DB si no existe
 init_db() {
     if [ ! -f "$DB_FILE" ]; then
         touch "$DB_FILE"
@@ -67,17 +66,12 @@ apply_changes() {
     echo -e "\n${YELLOW}[*] Aplicando cambios...${NC}"
 
     # 1. GENERAR EL SCRIPT notify_alexa.sh
-    # ------------------------------------
     echo "Generando script Bash..."
     
     cat <<EOF > "$SCRIPT_FILE"
 #!/bin/bash
-
-# SCRIPT GENERADO AUTOMÁTICAMENTE POR WAZUH ALEXA MANAGER
-# NO EDITAR MANUALMENTE - USAR EL MANAGER
-
+# SCRIPT GENERADO AUTOMÁTICAMENTE
 read -r INPUT_JSON
-
 LOGFILE="$LOG_FILE"
 TOKEN="$TOKEN"
 
@@ -86,12 +80,14 @@ AGENT_ID=\$(echo "\$INPUT_JSON" | jq -r '.parameters.alert.agent.id // "Unknown"
 IP=\$(echo "\$INPUT_JSON" | jq -r '.parameters.alert.data.srcip // "Unknown"')
 AGENT_NAME=\$(echo "\$INPUT_JSON" | jq -r '.parameters.alert.agent.name // "Unknown"')
 
-# Lógica condicional generada
+# Lógica condicional
 EOF
 
-    # Bucle para leer la DB y crear los IF/ELIF
     first=true
-    while IFS=":" read -r id name flow; do
+    # Usamos || [ -n "$id" ] para leer correctamente incluso si falta el último salto de línea
+    while IFS=":" read -r id name flow || [ -n "$id" ]; do
+        [ -z "$id" ] && continue # Saltar líneas vacías
+        
         if [ "$first" = true ]; then
             echo "if [ \"\$AGENT_ID\" == \"$id\" ]; then" >> "$SCRIPT_FILE"
             first=false
@@ -107,7 +103,6 @@ EOF
 EOF
     done < "$DB_FILE"
 
-    # Cierre del bloque IF
     if [ "$first" = false ]; then
         cat <<EOF >> "$SCRIPT_FILE"
 else
@@ -115,24 +110,20 @@ else
 fi
 EOF
     else
-        # Caso raro: DB vacía
         echo "echo \"\$(date) | No agents configured\" >> \$LOGFILE" >> "$SCRIPT_FILE"
     fi
 
     echo "exit 0" >> "$SCRIPT_FILE"
-
-    # Permisos y propietario
     chmod 755 "$SCRIPT_FILE"
     chown root:wazuh "$SCRIPT_FILE"
 
 
     # 2. ACTUALIZAR local_rules.xml
-    # -----------------------------
     echo "Actualizando regla XML..."
 
-    # Construir el regex: ^nombre1$|^nombre2$
     REGEX_STRING=""
-    while IFS=":" read -r id name flow; do
+    while IFS=":" read -r id name flow || [ -n "$id" ]; do
+        [ -z "$name" ] && continue
         if [ -z "$REGEX_STRING" ]; then
             REGEX_STRING="^${name}$"
         else
@@ -141,15 +132,15 @@ EOF
     done < "$DB_FILE"
 
     if [ -z "$REGEX_STRING" ]; then
-        REGEX_STRING="^NONE$" # Fallback si no hay agentes
+        REGEX_STRING="^NONE$"
     fi
+    
+    echo "Regex generado: $REGEX_STRING"
 
-    # Usamos sed para buscar el bloque de la regla 100005 y reemplazar solo la línea hostname
-    # Busca desde id="100005" hasta el cierre de regla, y reemplaza la etiqueta hostname
-    sed -i '/id="100005"/,/\/rule/ s|<hostname>.*</hostname>|<hostname>'"$REGEX_STRING"'</hostname>|' "$XML_FILE"
+    # CORRECCIÓN IMPORTANTE: Usamos # como delimitador en sed para evitar conflicto con los pipes (|)
+    sed -i '/id="100005"/,/\/rule/ s#<hostname>.*</hostname>#<hostname>'"$REGEX_STRING"'</hostname>#' "$XML_FILE"
 
     # 3. VERIFICAR Y REINICIAR
-    # ------------------------
     echo "Verificando configuración de Wazuh..."
     /var/ossec/bin/wazuh-analysisd -t > /dev/null 2>&1
     
@@ -173,8 +164,8 @@ list_endpoints() {
     printf "%-5s %-20s %-10s\n" "ID" "NOMBRE" "FLOW"
     echo "---------------------------------------"
     if [ -s "$DB_FILE" ]; then
-        while IFS=":" read -r id name flow; do
-            printf "%-5s %-20s %-10s\n" "$id" "$name" "$flow"
+        while IFS=":" read -r id name flow || [ -n "$id" ]; do
+             [ -n "$id" ] && printf "%-5s %-20s %-10s\n" "$id" "$name" "$flow"
         done < "$DB_FILE"
     else
         echo "No hay endpoints configurados."
@@ -193,7 +184,6 @@ add_endpoint() {
         return
     fi
 
-    # Verificar si ya existe
     if grep -q "^$new_id:" "$DB_FILE"; then
         echo -e "${RED}Error: El ID $new_id ya existe.${NC}"
     else
@@ -209,7 +199,6 @@ remove_endpoint() {
     read -p "Ingresa el ID del agente a eliminar: " target_id
 
     if grep -q "^$target_id:" "$DB_FILE"; then
-        # Crear archivo temporal sin la línea
         grep -v "^$target_id:" "$DB_FILE" > "${DB_FILE}.tmp" && mv "${DB_FILE}.tmp" "$DB_FILE"
         echo -e "${GREEN}Eliminado correctamente.${NC}"
         apply_changes
@@ -223,25 +212,17 @@ modify_endpoint() {
     list_endpoints
     echo -e "${YELLOW}--- Modificar Endpoint ---${NC}"
     read -p "Ingresa el ID del agente a modificar: " target_id
-
-    # Extraer valores actuales
     current_line=$(grep "^$target_id:" "$DB_FILE")
     
     if [ -n "$current_line" ]; then
         IFS=":" read -r curr_id curr_name curr_flow <<< "$current_line"
-        
         echo "Deja en blanco para mantener el valor actual."
         read -p "Nuevo Nombre [$curr_name]: " new_name
         read -p "Nuevo Flow [$curr_flow]: " new_flow
-
-        # Asignar valores (si están vacíos, usa los viejos)
         new_name=${new_name:-$curr_name}
         new_flow=${new_flow:-$curr_flow}
-
-        # Eliminar viejo y agregar nuevo
         grep -v "^$target_id:" "$DB_FILE" > "${DB_FILE}.tmp" && mv "${DB_FILE}.tmp" "$DB_FILE"
         echo "$target_id:$new_name:$new_flow" >> "$DB_FILE"
-        
         echo -e "${GREEN}Modificado correctamente.${NC}"
         apply_changes
     else
@@ -255,7 +236,6 @@ modify_endpoint() {
 # ==============================================================================
 check_root
 init_db
-
 while true; do
     show_header
     list_endpoints
@@ -266,7 +246,6 @@ while true; do
     echo "4. Salir"
     echo ""
     read -p "Selecciona una opción: " opcion
-
     case $opcion in
         1) add_endpoint ;;
         2) remove_endpoint ;;
