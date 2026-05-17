@@ -1,0 +1,9 @@
+  <rule id="100005" level="10" frequency="7" timeframe="15" ignore="60">
+    <if_matched_sid>5760</if_matched_sid>
+    <same_source_ip />
+    <hostname>^debian$|^ubuntu$|^debiantaul$</hostname>
+    <description>Brute Force SSH: Umbral de frecuencia superado.Notificación enviada a Alexa.</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+  </rule>
